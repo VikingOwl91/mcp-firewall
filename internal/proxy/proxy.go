@@ -39,7 +39,8 @@ func New(cfg *config.Config, logger *slog.Logger) *Proxy {
 		Logger: logger,
 	})
 
-	server.AddReceivingMiddleware(logging.NewReceivingMiddleware(logger))
+	hc := logging.NewHashChain()
+	server.AddReceivingMiddleware(logging.NewReceivingMiddleware(logger, hc))
 
 	var pe *policy.Engine
 	if len(cfg.Policy.Rules) > 0 || cfg.Policy.Default != "allow" {
@@ -155,14 +156,16 @@ func (p *Proxy) registerTools(ctx context.Context, alias string, session *mcp.Cl
 					}, nil
 				}
 				if decision.Effect == policy.Prompt {
-					msg := fmt.Sprintf("action requires user approval: %s", decision.Rule)
-					if decision.Message != "" {
-						msg = fmt.Sprintf("action requires user approval: %s", decision.Message)
+					action, err := requestApproval(ctx, req.Session, decision, p.cfg.ResolvedApprovalTimeout())
+					if info := logging.GetAuditInfo(ctx); info != nil {
+						info.ApprovalAction = action
 					}
-					return &mcp.CallToolResult{
-						Content: []mcp.Content{&mcp.TextContent{Text: msg}},
-						IsError: true,
-					}, nil
+					if err != nil {
+						return &mcp.CallToolResult{
+							Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
+							IsError: true,
+						}, nil
+					}
 				}
 			}
 
@@ -274,11 +277,13 @@ func (p *Proxy) registerResources(ctx context.Context, alias string, session *mc
 					return nil, fmt.Errorf("denied by policy: %s", decision.Rule)
 				}
 				if decision.Effect == policy.Prompt {
-					msg := fmt.Sprintf("action requires user approval: %s", decision.Rule)
-					if decision.Message != "" {
-						msg = fmt.Sprintf("action requires user approval: %s", decision.Message)
+					action, err := requestApproval(ctx, req.Session, decision, p.cfg.ResolvedApprovalTimeout())
+					if info := logging.GetAuditInfo(ctx); info != nil {
+						info.ApprovalAction = action
 					}
-					return nil, fmt.Errorf("%s", msg)
+					if err != nil {
+						return nil, err
+					}
 				}
 			}
 

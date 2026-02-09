@@ -1093,6 +1093,213 @@ func TestProxy_OutputRedaction_ResourceContents(t *testing.T) {
 	assert.Equal(t, "has [REDACTED] inside", result.Contents[0].Text)
 }
 
+// setupProxyWithElicitation creates a proxy with an upstream client that supports elicitation.
+func setupProxyWithElicitation(
+	t *testing.T,
+	pol config.PolicyConfig,
+	elicitHandler func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error),
+	downstreams ...downstreamSetup,
+) *mcp.ClientSession {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	logger := slog.Default()
+
+	cfgDownstreams := make(map[string]config.ServerConfig)
+	for _, ds := range downstreams {
+		cfgDownstreams[ds.alias] = config.ServerConfig{Command: "unused"}
+	}
+
+	cfg := &config.Config{
+		Downstreams: cfgDownstreams,
+		Policy:      pol,
+		LogLevel:    "debug",
+	}
+	require.NoError(t, cfg.Validate())
+
+	p := proxy.New(cfg, logger)
+
+	for _, ds := range downstreams {
+		dsServer := mcp.NewServer(&mcp.Implementation{
+			Name: "test-" + ds.alias, Version: "0.1.0",
+		}, nil)
+		ds.setup(dsServer)
+
+		dsServerT, dsClientT := mcp.NewInMemoryTransports()
+		_, err := dsServer.Connect(ctx, dsServerT, nil)
+		require.NoError(t, err)
+
+		err = p.ConnectDownstream(ctx, ds.alias, dsClientT)
+		require.NoError(t, err)
+	}
+
+	err := p.RegisterUpstreamHandlers(ctx)
+	require.NoError(t, err)
+
+	upServerT, upClientT := mcp.NewInMemoryTransports()
+	go func() { _ = p.ServeUpstream(ctx, upServerT) }()
+
+	clientOpts := &mcp.ClientOptions{}
+	if elicitHandler != nil {
+		clientOpts.ElicitationHandler = elicitHandler
+	}
+
+	client := mcp.NewClient(&mcp.Implementation{
+		Name: "test-client", Version: "0.1.0",
+	}, clientOpts)
+	session, err := client.Connect(ctx, upClientT, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { session.Close() })
+
+	return session
+}
+
+func TestProxy_PromptApproval_Accepted(t *testing.T) {
+	type EmptyInput struct{}
+
+	session := setupProxyWithElicitation(t,
+		config.PolicyConfig{
+			Default: "deny",
+			Rules: []config.PolicyRule{
+				{Name: "ask-first", Expression: `tool.name == "danger"`, Effect: "prompt"},
+			},
+		},
+		func(_ context.Context, _ *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			return &mcp.ElicitResult{Action: "accept"}, nil
+		},
+		downstreamSetup{
+			alias: "myserver",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "danger"}, func(_ context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "approved and executed"}}}, nil, nil
+				})
+			},
+		},
+	)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "myserver__danger"})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	text := result.Content[0].(*mcp.TextContent)
+	assert.Equal(t, "approved and executed", text.Text)
+}
+
+func TestProxy_PromptApproval_Declined(t *testing.T) {
+	type EmptyInput struct{}
+
+	session := setupProxyWithElicitation(t,
+		config.PolicyConfig{
+			Default: "deny",
+			Rules: []config.PolicyRule{
+				{Name: "ask-first", Expression: `tool.name == "danger"`, Effect: "prompt"},
+			},
+		},
+		func(_ context.Context, _ *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			return &mcp.ElicitResult{Action: "decline"}, nil
+		},
+		downstreamSetup{
+			alias: "myserver",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "danger"}, func(_ context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "should not reach"}}}, nil, nil
+				})
+			},
+		},
+	)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "myserver__danger"})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	text := result.Content[0].(*mcp.TextContent)
+	assert.Contains(t, text.Text, "declined")
+}
+
+func TestProxy_PromptApproval_NoElicitation(t *testing.T) {
+	type EmptyInput struct{}
+
+	session := setupProxyWithElicitation(t,
+		config.PolicyConfig{
+			Default: "deny",
+			Rules: []config.PolicyRule{
+				{Name: "ask-first", Expression: `tool.name == "danger"`, Effect: "prompt"},
+			},
+		},
+		nil, // no elicitation handler → no capability
+		downstreamSetup{
+			alias: "myserver",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "danger"}, func(_ context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "should not reach"}}}, nil, nil
+				})
+			},
+		},
+	)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "myserver__danger"})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	text := result.Content[0].(*mcp.TextContent)
+	assert.Contains(t, text.Text, "requires user approval")
+}
+
+func TestProxy_PromptApproval_ResourceRead(t *testing.T) {
+	session := setupProxyWithElicitation(t,
+		config.PolicyConfig{
+			Default: "allow",
+			Rules: []config.PolicyRule{
+				{Name: "prompt-etc", Expression: `resource.uri.startsWith("file:///etc/")`, Effect: "prompt"},
+			},
+		},
+		func(_ context.Context, _ *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			return &mcp.ElicitResult{Action: "accept"}, nil
+		},
+		downstreamSetup{
+			alias: "files",
+			setup: func(s *mcp.Server) {
+				s.AddResource(&mcp.Resource{URI: "file:///etc/passwd", Name: "passwd"}, func(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+					return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "file:///etc/passwd", Text: "root:x:0:0"}}}, nil
+				})
+			},
+		},
+	)
+
+	result, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: "file:///etc/passwd"})
+	require.NoError(t, err)
+	assert.Equal(t, "root:x:0:0", result.Contents[0].Text)
+}
+
+func TestProxy_PromptApproval_CustomMessage(t *testing.T) {
+	type EmptyInput struct{}
+	var receivedMessage string
+
+	session := setupProxyWithElicitation(t,
+		config.PolicyConfig{
+			Default: "deny",
+			Rules: []config.PolicyRule{
+				{Name: "ask-first", Expression: `tool.name == "danger"`, Effect: "prompt", Message: "This modifies production data"},
+			},
+		},
+		func(_ context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			receivedMessage = req.Params.Message
+			return &mcp.ElicitResult{Action: "accept"}, nil
+		},
+		downstreamSetup{
+			alias: "myserver",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "danger"}, func(_ context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "done"}}}, nil, nil
+				})
+			},
+		},
+	)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "myserver__danger"})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Equal(t, "This modifies production data", receivedMessage)
+}
+
 func TestProxy_Redaction_NoMatch(t *testing.T) {
 	type EmptyInput struct{}
 

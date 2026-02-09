@@ -5,14 +5,15 @@ import "context"
 type contextKey struct{}
 
 type AuditInfo struct {
-	Server       string
-	ToolName     string
-	ResourceURI  string
-	PolicyEffect string
-	PolicyRule   string
-	Timeout      bool
-	Truncated    bool
-	Redacted     bool
+	Server         string
+	ToolName       string
+	ResourceURI    string
+	PolicyEffect   string
+	PolicyRule     string
+	ApprovalAction string
+	Timeout        bool
+	Truncated      bool
+	Redacted       bool
 }
 
 func WithAuditInfo(ctx context.Context, info *AuditInfo) context.Context {

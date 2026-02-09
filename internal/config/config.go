@@ -41,12 +41,13 @@ type RedactionConfig struct {
 }
 
 type Config struct {
-	Downstreams    map[string]ServerConfig `yaml:"downstreams"`
-	Policy         PolicyConfig            `yaml:"policy,omitempty"`
-	Redaction      RedactionConfig         `yaml:"redaction,omitempty"`
-	LogLevel       string                  `yaml:"log_level"`
-	Timeout        string                  `yaml:"timeout,omitempty"`
-	MaxOutputBytes int                     `yaml:"max_output_bytes,omitempty"`
+	Downstreams     map[string]ServerConfig `yaml:"downstreams"`
+	Policy          PolicyConfig            `yaml:"policy,omitempty"`
+	Redaction       RedactionConfig         `yaml:"redaction,omitempty"`
+	LogLevel        string                  `yaml:"log_level"`
+	Timeout         string                  `yaml:"timeout,omitempty"`
+	MaxOutputBytes  int                     `yaml:"max_output_bytes,omitempty"`
+	ApprovalTimeout string                  `yaml:"approval_timeout,omitempty"`
 }
 
 // oldConfig detects the deprecated singular "downstream:" key.
@@ -111,6 +112,13 @@ func (c *Config) Validate() error {
 		c.MaxOutputBytes = 1048576
 	}
 
+	if c.ApprovalTimeout == "" {
+		c.ApprovalTimeout = "2m"
+	}
+	if _, err := time.ParseDuration(c.ApprovalTimeout); err != nil {
+		return fmt.Errorf("invalid approval_timeout %q: %w", c.ApprovalTimeout, err)
+	}
+
 	if err := c.validatePolicy(); err != nil {
 		return err
 	}
@@ -124,6 +132,11 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+func (c *Config) ResolvedApprovalTimeout() time.Duration {
+	d, _ := time.ParseDuration(c.ApprovalTimeout)
+	return d
 }
 
 func (c *Config) ResolvedTimeout(alias string) time.Duration {

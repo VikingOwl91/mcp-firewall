@@ -2,13 +2,14 @@ package logging
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func NewReceivingMiddleware(logger *slog.Logger) mcp.Middleware {
+func NewReceivingMiddleware(logger *slog.Logger, hc *HashChain) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			info := &AuditInfo{}
@@ -40,6 +41,9 @@ func NewReceivingMiddleware(logger *slog.Logger) mcp.Middleware {
 			if info.PolicyRule != "" {
 				attrs = append(attrs, slog.String("policy_rule", info.PolicyRule))
 			}
+			if info.ApprovalAction != "" {
+				attrs = append(attrs, slog.String("approval_action", info.ApprovalAction))
+			}
 			if info.Timeout {
 				attrs = append(attrs, slog.Bool("timeout", true))
 			}
@@ -50,9 +54,27 @@ func NewReceivingMiddleware(logger *slog.Logger) mcp.Middleware {
 				attrs = append(attrs, slog.Bool("redacted", true))
 			}
 
+			if hc != nil {
+				canonical, _ := json.Marshal(attrsToMap(attrs))
+				seq, entryHash, prevHash := hc.Next(canonical)
+				attrs = append(attrs,
+					slog.Uint64("audit_seq", seq),
+					slog.String("entry_hash", entryHash),
+					slog.String("prev_hash", prevHash),
+				)
+			}
+
 			logger.LogAttrs(ctx, slog.LevelInfo, "mcp request", attrs...)
 
 			return result, err
 		}
 	}
+}
+
+func attrsToMap(attrs []slog.Attr) map[string]any {
+	m := make(map[string]any, len(attrs))
+	for _, a := range attrs {
+		m[a.Key] = a.Value.Any()
+	}
+	return m
 }

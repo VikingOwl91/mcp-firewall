@@ -38,6 +38,8 @@ func TestLoad_ValidMultiDownstream(t *testing.T) {
 	assert.Equal(t, "debug", cfg.LogLevel)
 	assert.Equal(t, "30s", cfg.Timeout)
 	assert.Equal(t, 524288, cfg.MaxOutputBytes)
+	assert.Equal(t, "30s", cfg.ApprovalTimeout)
+	assert.Equal(t, 30*time.Second, cfg.ResolvedApprovalTimeout())
 
 	assert.Equal(t, 10*time.Second, cfg.ResolvedTimeout("echoserver"))
 	assert.Equal(t, 30*time.Second, cfg.ResolvedTimeout("another"))
@@ -463,6 +465,43 @@ func TestValidate_RedactionDuplicateNames(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "duplicate")
+}
+
+func TestValidate_ApprovalTimeoutDefault(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+	assert.Equal(t, "2m", cfg.ApprovalTimeout)
+	assert.Equal(t, 2*time.Minute, cfg.ResolvedApprovalTimeout())
+}
+
+func TestValidate_ApprovalTimeoutCustom(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+		ApprovalTimeout: "30s",
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+	assert.Equal(t, "30s", cfg.ApprovalTimeout)
+	assert.Equal(t, 30*time.Second, cfg.ResolvedApprovalTimeout())
+}
+
+func TestValidate_ApprovalTimeoutInvalid(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+		ApprovalTimeout: "not-a-duration",
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "approval_timeout")
 }
 
 func TestValidate_ValidAliases(t *testing.T) {

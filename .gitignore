@@ -1,0 +1,17 @@
+# Go binaries
+/mcp-firewall
+/testdata/echoserver/echoserver
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+/vendor/

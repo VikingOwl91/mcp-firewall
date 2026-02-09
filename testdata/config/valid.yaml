@@ -1,0 +1,7 @@
+downstream:
+  command: ./testdata/echoserver/echoserver
+  args:
+    - --verbose
+  env:
+    - FOO=bar
+log_level: debug

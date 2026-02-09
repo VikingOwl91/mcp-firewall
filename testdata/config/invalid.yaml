@@ -1,0 +1,2 @@
+downstream:
+  command: [not, valid, yaml, for, a, string, field

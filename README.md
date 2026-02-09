@@ -36,6 +36,13 @@ Download prebuilt binaries from [GitHub Releases](https://github.com/VikingOwl91
 
 ### 1. Create a config file
 
+```bash
+mcp-firewall --init
+# Creates ~/.mcp-firewall/config.yaml with a commented template
+```
+
+Then edit it to add your downstream servers and policy rules:
+
 ```yaml
 downstreams:
   myserver:
@@ -212,6 +219,7 @@ mcp-firewall --config config.yaml --workspace /path/to/project
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--config` | `~/.mcp-firewall/config.yaml` | Path to config file |
+| `--init` | | Create default config file and exit |
 | `--profile` | *(env/inline)* | Config profile name |
 | `--workspace` | *(auto-detect)* | Workspace directory for local overrides |
 | `--generate-lockfile` | | Compute SHA-256 hashes for all downstreams and print YAML |

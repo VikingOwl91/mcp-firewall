@@ -95,9 +95,14 @@ func TestProxy_ToolListAndCall(t *testing.T) {
 
 	listResult, err := session.ListTools(context.Background(), nil)
 	require.NoError(t, err)
-	require.Len(t, listResult.Tools, 1)
-	assert.Equal(t, "echoserver__echo", listResult.Tools[0].Name)
-	assert.Equal(t, "echoes a message", listResult.Tools[0].Description)
+	// +1 for explain_effective_policy tool
+	require.Len(t, listResult.Tools, 2)
+	toolNames := make([]string, len(listResult.Tools))
+	for i, tool := range listResult.Tools {
+		toolNames[i] = tool.Name
+	}
+	assert.Contains(t, toolNames, "echoserver__echo")
+	assert.Contains(t, toolNames, "explain_effective_policy")
 
 	callResult, err := session.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "echoserver__echo",
@@ -148,7 +153,9 @@ func TestProxy_NoToolsNoResources(t *testing.T) {
 
 	listTools, err := session.ListTools(context.Background(), nil)
 	require.NoError(t, err)
-	assert.Empty(t, listTools.Tools)
+	// Only the explain_effective_policy tool should be present
+	require.Len(t, listTools.Tools, 1)
+	assert.Equal(t, "explain_effective_policy", listTools.Tools[0].Name)
 
 	listRes, err := session.ListResources(context.Background(), nil)
 	require.NoError(t, err)
@@ -248,11 +255,16 @@ func TestProxy_MultipleDownstreams_ToolList(t *testing.T) {
 
 	listResult, err := session.ListTools(context.Background(), nil)
 	require.NoError(t, err)
-	require.Len(t, listResult.Tools, 2)
+	// +1 for explain_effective_policy tool
+	require.Len(t, listResult.Tools, 3)
 
-	names := []string{listResult.Tools[0].Name, listResult.Tools[1].Name}
+	names := make([]string, len(listResult.Tools))
+	for i, tool := range listResult.Tools {
+		names[i] = tool.Name
+	}
 	assert.Contains(t, names, "alpha__greet")
 	assert.Contains(t, names, "beta__greet")
+	assert.Contains(t, names, "explain_effective_policy")
 }
 
 func TestProxy_MultipleDownstreams_ToolCallRouting(t *testing.T) {

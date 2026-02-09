@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"time"
 
@@ -20,24 +21,26 @@ type ServerConfig struct {
 }
 
 type PolicyRule struct {
-	Name       string `yaml:"name"`
-	Expression string `yaml:"expression"`
-	Effect     string `yaml:"effect"`
-	Message    string `yaml:"message,omitempty"`
+	Name       string `yaml:"name" json:"name"`
+	Expression string `yaml:"expression" json:"expression"`
+	Effect     string `yaml:"effect" json:"effect"`
+	Message    string `yaml:"message,omitempty" json:"message,omitempty"`
+	Source     string `yaml:"source,omitempty" json:"source,omitempty"`
 }
 
 type PolicyConfig struct {
-	Default string       `yaml:"default"`
-	Rules   []PolicyRule `yaml:"rules,omitempty"`
+	Default string       `yaml:"default" json:"default,omitempty"`
+	Rules   []PolicyRule `yaml:"rules,omitempty" json:"rules,omitempty"`
 }
 
 type RedactionPattern struct {
-	Name    string `yaml:"name"`
-	Pattern string `yaml:"pattern"`
+	Name    string `yaml:"name" json:"name"`
+	Pattern string `yaml:"pattern" json:"pattern"`
+	Source  string `yaml:"source,omitempty" json:"source,omitempty"`
 }
 
 type RedactionConfig struct {
-	Patterns []RedactionPattern `yaml:"patterns,omitempty"`
+	Patterns []RedactionPattern `yaml:"patterns,omitempty" json:"patterns,omitempty"`
 }
 
 type Config struct {
@@ -50,9 +53,142 @@ type Config struct {
 	ApprovalTimeout string                  `yaml:"approval_timeout,omitempty"`
 }
 
+// GlobalConfig is the top-level config file structure supporting named profiles.
+type GlobalConfig struct {
+	Profiles       map[string]Config `yaml:"profiles,omitempty"`
+	AllowExpansion bool              `yaml:"allow_expansion,omitempty"`
+	Config         `yaml:",inline"`
+}
+
 // oldConfig detects the deprecated singular "downstream:" key.
 type oldConfig struct {
 	Downstream *ServerConfig `yaml:"downstream"`
+}
+
+// LoadGlobal loads the global config file and returns a GlobalConfig.
+func LoadGlobal(path string) (*GlobalConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading config %s: %w", path, err)
+	}
+
+	// Check for old format
+	var old oldConfig
+	if err := yaml.Unmarshal(data, &old); err == nil && old.Downstream != nil {
+		return nil, fmt.Errorf("parsing config %s: old format detected — use 'downstreams:' (plural map) instead of 'downstream:'", path)
+	}
+
+	var gc GlobalConfig
+	if err := yaml.Unmarshal(data, &gc); err != nil {
+		return nil, fmt.Errorf("parsing config %s: %w", path, err)
+	}
+
+	return &gc, nil
+}
+
+// ResolvedConfig holds the result of ResolveConfig.
+type ResolvedConfig struct {
+	Config        *Config
+	ProfileName   string // resolved profile name ("" for default)
+	LocalOverride string // path to local override file ("" if none)
+}
+
+// localOverrideNames are the filenames checked in a workspace directory.
+var localOverrideNames = []string{
+	".mcp-firewall.yaml",
+	".mcp-firewall.yml",
+	".mcp-firewall.json",
+}
+
+// ResolveConfig is the full pipeline:
+// 1. LoadGlobal(configPath)
+// 2. ResolveProfile(gc, profileName)
+// 3. If workspacePath set, look for .mcp-firewall.{yaml,yml,json}, LoadLocal, MergeLocal
+// Returns the effective config with provenance metadata.
+func ResolveConfig(configPath, profileName, workspacePath string) (*ResolvedConfig, error) {
+	gc, err := LoadGlobal(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg, resolvedProfile, err := ResolveProfile(gc, profileName)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("validating resolved config: %w", err)
+	}
+
+	// Stamp provenance on base rules/patterns
+	source := "base"
+	if resolvedProfile != "" {
+		source = "profile:" + resolvedProfile
+	}
+	for i := range cfg.Policy.Rules {
+		if cfg.Policy.Rules[i].Source == "" {
+			cfg.Policy.Rules[i].Source = source
+		}
+	}
+	for i := range cfg.Redaction.Patterns {
+		if cfg.Redaction.Patterns[i].Source == "" {
+			cfg.Redaction.Patterns[i].Source = source
+		}
+	}
+
+	result := &ResolvedConfig{
+		Config:      cfg,
+		ProfileName: resolvedProfile,
+	}
+
+	if workspacePath != "" {
+		localPath := findLocalOverride(workspacePath)
+		if localPath != "" {
+			local, err := LoadLocal(localPath)
+			if err != nil {
+				return nil, err
+			}
+			cfg, err = MergeLocal(cfg, local, gc.AllowExpansion)
+			if err != nil {
+				return nil, fmt.Errorf("merging local override: %w", err)
+			}
+			result.Config = cfg
+			result.LocalOverride = localPath
+		}
+	}
+
+	return result, nil
+}
+
+// findLocalOverride checks for .mcp-firewall.{yaml,yml,json} in dir.
+func findLocalOverride(dir string) string {
+	for _, name := range localOverrideNames {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
+// DetectWorkspace walks up from startDir looking for a local override file.
+// Stops at the filesystem root. Returns "" if none found.
+func DetectWorkspace(startDir string) string {
+	dir, err := filepath.Abs(startDir)
+	if err != nil {
+		return ""
+	}
+	for {
+		if findLocalOverride(dir) != "" {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
 }
 
 func Load(path string) (*Config, error) {

@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -518,3 +519,128 @@ func TestValidate_ValidAliases(t *testing.T) {
 		})
 	}
 }
+
+// --- GlobalConfig tests ---
+
+func TestGlobalConfig_BackwardCompat(t *testing.T) {
+	// Existing flat config loads as default profile via LoadGlobal
+	gc, err := config.LoadGlobal("../../testdata/config/valid_minimal.yaml")
+	require.NoError(t, err)
+
+	// Inline config should have the downstream
+	require.Len(t, gc.Downstreams, 1)
+	assert.Equal(t, "echo", gc.Downstreams["myserver"].Command)
+
+	// No profiles defined
+	assert.Empty(t, gc.Profiles)
+}
+
+func TestGlobalConfig_WithProfiles(t *testing.T) {
+	gc, err := config.LoadGlobal("../../testdata/config/profiles.yaml")
+	require.NoError(t, err)
+
+	// Inline default config
+	require.Len(t, gc.Downstreams, 1)
+	assert.Equal(t, "./echoserver", gc.Downstreams["echoserver"].Command)
+	assert.Equal(t, "deny", gc.Policy.Default)
+
+	// Named profiles
+	require.Len(t, gc.Profiles, 2)
+
+	dev := gc.Profiles["development"]
+	require.Len(t, dev.Downstreams, 1)
+	assert.Equal(t, "./echoserver-dev", dev.Downstreams["echoserver"].Command)
+	assert.Equal(t, "allow", dev.Policy.Default)
+	assert.Equal(t, "debug", dev.LogLevel)
+
+	strict := gc.Profiles["strict"]
+	require.Len(t, strict.Downstreams, 1)
+	assert.Equal(t, "deny", strict.Policy.Default)
+	require.Len(t, strict.Policy.Rules, 1)
+	assert.Equal(t, "prompt-all-tools", strict.Policy.Rules[0].Name)
+	assert.Equal(t, "1m", strict.ApprovalTimeout)
+}
+
+func TestGlobalConfig_AllowExpansion(t *testing.T) {
+	gc, err := config.LoadGlobal("../../testdata/config/profiles.yaml")
+	require.NoError(t, err)
+	assert.False(t, gc.AllowExpansion)
+}
+
+func TestGlobalConfig_FileNotFound(t *testing.T) {
+	_, err := config.LoadGlobal("nonexistent.yaml")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nonexistent.yaml")
+}
+
+// --- ResolveConfig pipeline tests ---
+
+func TestResolveConfig_NoProfile_NoLocal(t *testing.T) {
+	resolved, err := config.ResolveConfig("../../testdata/config/valid_minimal.yaml", "", "")
+	require.NoError(t, err)
+	assert.Equal(t, "echo", resolved.Config.Downstreams["myserver"].Command)
+	assert.Equal(t, "deny", resolved.Config.Policy.Default)
+}
+
+func TestResolveConfig_WithProfile(t *testing.T) {
+	resolved, err := config.ResolveConfig("../../testdata/config/profiles.yaml", "development", "")
+	require.NoError(t, err)
+	assert.Equal(t, "./echoserver-dev", resolved.Config.Downstreams["echoserver"].Command)
+	assert.Equal(t, "allow", resolved.Config.Policy.Default)
+	assert.Equal(t, "development", resolved.ProfileName)
+}
+
+func TestResolveConfig_WithLocal(t *testing.T) {
+	resolved, err := config.ResolveConfig("../../testdata/config/valid_minimal.yaml", "", "../../testdata/config")
+	require.NoError(t, err)
+	// Base config is loaded
+	assert.Equal(t, "echo", resolved.Config.Downstreams["myserver"].Command)
+	// If a .mcp-firewall.yaml exists in the workspace, it's merged.
+	// testdata/config doesn't have one, so this is a no-op.
+}
+
+func TestResolveConfig_LocalFileNotFound(t *testing.T) {
+	// Missing local file is not an error — local overrides are optional
+	resolved, err := config.ResolveConfig("../../testdata/config/valid_minimal.yaml", "", "/tmp/nonexistent-workspace")
+	require.NoError(t, err)
+	assert.Equal(t, "echo", resolved.Config.Downstreams["myserver"].Command)
+}
+
+func TestResolveConfig_ProfilePlusLocal(t *testing.T) {
+	// Create a workspace dir with a .mcp-firewall.yaml for this test
+	dir := t.TempDir()
+	localPath := dir + "/.mcp-firewall.yaml"
+	localContent := `
+policy:
+  rules:
+    - name: block-exec
+      expression: 'tool.name == "exec"'
+      effect: deny
+timeout: 10s
+`
+	require.NoError(t, writeFile(localPath, localContent))
+
+	resolved, err := config.ResolveConfig("../../testdata/config/profiles.yaml", "development", dir)
+	require.NoError(t, err)
+
+	// Profile config applies
+	assert.Equal(t, "./echoserver-dev", resolved.Config.Downstreams["echoserver"].Command)
+	// Local deny rule prepended
+	require.True(t, len(resolved.Config.Policy.Rules) >= 1)
+	assert.Equal(t, "block-exec", resolved.Config.Policy.Rules[0].Name)
+	assert.Equal(t, "local", resolved.Config.Policy.Rules[0].Source)
+	// Provenance metadata
+	assert.Equal(t, "development", resolved.ProfileName)
+	assert.Equal(t, localPath, resolved.LocalOverride)
+}
+
+func TestResolveConfig_InvalidProfile(t *testing.T) {
+	_, err := config.ResolveConfig("../../testdata/config/profiles.yaml", "nonexistent", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nonexistent")
+}
+
+func writeFile(path, content string) error {
+	return os.WriteFile(path, []byte(content), 0644)
+}
+

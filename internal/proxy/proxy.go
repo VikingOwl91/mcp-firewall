@@ -22,16 +22,29 @@ type downstreamEntry struct {
 }
 
 type Proxy struct {
-	cfg            *config.Config
-	logger         *slog.Logger
-	server         *mcp.Server
-	downstreams    map[string]*downstreamEntry
-	policy         *policy.Engine
-	redaction      *redaction.Engine
-	resourceRoutes map[string]string // URI → alias
+	cfg               *config.Config
+	logger            *slog.Logger
+	server            *mcp.Server
+	downstreams       map[string]*downstreamEntry
+	policy            *policy.Engine
+	redaction         *redaction.Engine
+	resourceRoutes    map[string]string // URI → alias
+	profileName       string
+	localOverridePath string
 }
 
-func New(cfg *config.Config, logger *slog.Logger) *Proxy {
+// ProxyOption configures optional Proxy behavior.
+type ProxyOption func(*Proxy)
+
+// WithProvenance sets provenance metadata for the explain tool.
+func WithProvenance(profile, localPath string) ProxyOption {
+	return func(p *Proxy) {
+		p.profileName = profile
+		p.localOverridePath = localPath
+	}
+}
+
+func New(cfg *config.Config, logger *slog.Logger, opts ...ProxyOption) *Proxy {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "mcp-firewall",
 		Version: "0.2.0",
@@ -60,7 +73,7 @@ func New(cfg *config.Config, logger *slog.Logger) *Proxy {
 		}
 	}
 
-	return &Proxy{
+	p := &Proxy{
 		cfg:            cfg,
 		logger:         logger,
 		server:         server,
@@ -69,6 +82,12 @@ func New(cfg *config.Config, logger *slog.Logger) *Proxy {
 		redaction:      re,
 		resourceRoutes: make(map[string]string),
 	}
+
+	for _, opt := range opts {
+		opt(p)
+	}
+
+	return p
 }
 
 func (p *Proxy) ConnectDownstream(ctx context.Context, alias string, t mcp.Transport) error {
@@ -90,6 +109,9 @@ func (p *Proxy) ConnectDownstream(ctx context.Context, alias string, t mcp.Trans
 }
 
 func (p *Proxy) RegisterUpstreamHandlers(ctx context.Context) error {
+	// Register firewall introspection tool
+	p.registerExplainTool()
+
 	// Process downstreams in sorted order for deterministic tool/resource registration
 	aliases := make([]string, 0, len(p.downstreams))
 	for alias := range p.downstreams {

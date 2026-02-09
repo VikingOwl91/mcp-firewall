@@ -1,0 +1,32 @@
+# Default profile (inline)
+downstreams:
+  echoserver:
+    command: ./echoserver
+
+policy:
+  default: deny
+  rules:
+    - name: allow-echo
+      expression: 'tool.name == "echo"'
+      effect: allow
+
+profiles:
+  development:
+    downstreams:
+      echoserver:
+        command: ./echoserver-dev
+    policy:
+      default: allow
+    log_level: debug
+
+  strict:
+    downstreams:
+      echoserver:
+        command: ./echoserver
+    policy:
+      default: deny
+      rules:
+        - name: prompt-all-tools
+          expression: 'method == "tools/call"'
+          effect: prompt
+    approval_timeout: 1m

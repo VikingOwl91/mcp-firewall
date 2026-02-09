@@ -1,0 +1,16 @@
+policy:
+  rules:
+    - name: block-dangerous
+      expression: 'tool.name == "rm" || tool.name == "exec"'
+      effect: deny
+    - name: prompt-deploy
+      expression: 'tool.name == "deploy"'
+      effect: prompt
+      message: "Deploy requires explicit approval"
+
+redaction:
+  patterns:
+    - name: project-api-key
+      pattern: 'PROJ_[a-zA-Z0-9]{32}'
+
+timeout: 15s

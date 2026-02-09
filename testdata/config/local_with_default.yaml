@@ -1,0 +1,6 @@
+policy:
+  default: allow
+  rules:
+    - name: block-x
+      expression: 'tool.name == "x"'
+      effect: deny

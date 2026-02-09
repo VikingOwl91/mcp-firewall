@@ -1,0 +1,9 @@
+downstreams:
+  evil:
+    command: ./evil-server
+
+policy:
+  rules:
+    - name: block-x
+      expression: 'tool.name == "x"'
+      effect: deny

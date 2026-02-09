@@ -801,3 +801,327 @@ func TestProxy_ResourceReadTruncated(t *testing.T) {
 	last := result.Contents[len(result.Contents)-1]
 	assert.Contains(t, last.Text, "truncated")
 }
+
+// --- Prompt effect integration tests ---
+
+func TestProxy_PolicyPromptToolCall(t *testing.T) {
+	type EmptyInput struct{}
+
+	session := setupProxyWithPolicy(t,
+		config.PolicyConfig{
+			Default: "deny",
+			Rules: []config.PolicyRule{
+				{Name: "ask-first", Expression: `tool.name == "danger"`, Effect: "prompt"},
+			},
+		},
+		downstreamSetup{
+			alias: "myserver",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "danger"}, func(_ context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "should not reach"}}}, nil, nil
+				})
+			},
+		},
+	)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "myserver__danger"})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	text := result.Content[0].(*mcp.TextContent)
+	assert.Contains(t, text.Text, "requires user approval")
+	assert.Contains(t, text.Text, "ask-first")
+}
+
+func TestProxy_PolicyPromptToolCall_CustomMsg(t *testing.T) {
+	type EmptyInput struct{}
+
+	session := setupProxyWithPolicy(t,
+		config.PolicyConfig{
+			Default: "deny",
+			Rules: []config.PolicyRule{
+				{Name: "ask-first", Expression: `tool.name == "danger"`, Effect: "prompt", Message: "This modifies production"},
+			},
+		},
+		downstreamSetup{
+			alias: "myserver",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "danger"}, func(_ context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "should not reach"}}}, nil, nil
+				})
+			},
+		},
+	)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "myserver__danger"})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	text := result.Content[0].(*mcp.TextContent)
+	assert.Contains(t, text.Text, "This modifies production")
+}
+
+func TestProxy_PolicyPromptResourceRead(t *testing.T) {
+	session := setupProxyWithPolicy(t,
+		config.PolicyConfig{
+			Default: "allow",
+			Rules: []config.PolicyRule{
+				{Name: "prompt-etc", Expression: `resource.uri.startsWith("file:///etc/")`, Effect: "prompt"},
+			},
+		},
+		downstreamSetup{
+			alias: "files",
+			setup: func(s *mcp.Server) {
+				s.AddResource(&mcp.Resource{URI: "file:///etc/passwd", Name: "passwd"}, func(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+					return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "file:///etc/passwd", Text: "should not reach"}}}, nil
+				})
+			},
+		},
+	)
+
+	_, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: "file:///etc/passwd"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires user approval")
+}
+
+// --- CEL scope integration tests ---
+
+func TestProxy_PolicyScopeRule_ArgumentStartsWith(t *testing.T) {
+	type PathInput struct {
+		Path string `json:"path"`
+	}
+
+	session := setupProxyWithPolicy(t,
+		config.PolicyConfig{
+			Default: "deny",
+			Rules: []config.PolicyRule{
+				{Name: "allow-workspace", Expression: `has(tool.arguments.path) && tool.arguments.path.startsWith("/workspace/")`, Effect: "allow"},
+			},
+		},
+		downstreamSetup{
+			alias: "files",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "read"}, func(_ context.Context, _ *mcp.CallToolRequest, input PathInput) (*mcp.CallToolResult, any, error) {
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("read: %s", input.Path)}}}, nil, nil
+				})
+			},
+		},
+	)
+
+	// Allowed path
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "files__read",
+		Arguments: map[string]any{"path": "/workspace/src/main.go"},
+	})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	text := result.Content[0].(*mcp.TextContent)
+	assert.Contains(t, text.Text, "read: /workspace/src/main.go")
+
+	// Denied path
+	result, err = session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "files__read",
+		Arguments: map[string]any{"path": "/etc/passwd"},
+	})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	text = result.Content[0].(*mcp.TextContent)
+	assert.Contains(t, text.Text, "denied by policy")
+}
+
+func TestProxy_PolicyScopeRule_HasGuard_MissingArg(t *testing.T) {
+	type EmptyInput struct{}
+
+	session := setupProxyWithPolicy(t,
+		config.PolicyConfig{
+			Default: "deny",
+			Rules: []config.PolicyRule{
+				{Name: "allow-workspace", Expression: `has(tool.arguments.path) && tool.arguments.path.startsWith("/workspace/")`, Effect: "allow"},
+			},
+		},
+		downstreamSetup{
+			alias: "files",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "read"}, func(_ context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "should not reach"}}}, nil, nil
+				})
+			},
+		},
+	)
+
+	// No path argument — falls to default deny
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "files__read",
+	})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	text := result.Content[0].(*mcp.TextContent)
+	assert.Contains(t, text.Text, "denied by policy")
+}
+
+func TestProxy_PolicyScopeRule_ResourceURIPrefix(t *testing.T) {
+	session := setupProxyWithPolicy(t,
+		config.PolicyConfig{
+			Default: "deny",
+			Rules: []config.PolicyRule{
+				{Name: "allow-home", Expression: `resource.uri.startsWith("file:///home/")`, Effect: "allow"},
+			},
+		},
+		downstreamSetup{
+			alias: "files",
+			setup: func(s *mcp.Server) {
+				s.AddResource(&mcp.Resource{URI: "file:///home/user/data", Name: "data"}, func(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+					return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "file:///home/user/data", Text: "user data"}}}, nil
+				})
+				s.AddResource(&mcp.Resource{URI: "file:///etc/secret", Name: "secret"}, func(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+					return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "file:///etc/secret", Text: "should not reach"}}}, nil
+				})
+			},
+		},
+	)
+
+	// Allowed
+	result, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: "file:///home/user/data"})
+	require.NoError(t, err)
+	assert.Equal(t, "user data", result.Contents[0].Text)
+
+	// Denied
+	_, err = session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: "file:///etc/secret"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "denied by policy")
+}
+
+// --- Redaction integration tests ---
+
+func TestProxy_InputRedaction_ToolArguments(t *testing.T) {
+	type Input struct {
+		Data string `json:"data"`
+	}
+
+	var receivedData string
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "unused"},
+		},
+		Redaction: config.RedactionConfig{
+			Patterns: []config.RedactionPattern{
+				{Name: "secret", Pattern: `secret-\w+`},
+			},
+		},
+	}
+	cfg.Policy.Default = "allow"
+	require.NoError(t, cfg.Validate())
+
+	session := setupProxyWithConfig(t, cfg,
+		downstreamSetup{
+			alias: "myserver",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "process"}, func(_ context.Context, _ *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, any, error) {
+					receivedData = input.Data
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil, nil
+				})
+			},
+		},
+	)
+
+	_, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "myserver__process",
+		Arguments: map[string]any{"data": "the key is secret-abc123"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "the key is [REDACTED]", receivedData)
+}
+
+func TestProxy_OutputRedaction_ToolResult(t *testing.T) {
+	type EmptyInput struct{}
+
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "unused"},
+		},
+		Redaction: config.RedactionConfig{
+			Patterns: []config.RedactionPattern{
+				{Name: "secret", Pattern: `secret-\w+`},
+			},
+		},
+	}
+	cfg.Policy.Default = "allow"
+	require.NoError(t, cfg.Validate())
+
+	session := setupProxyWithConfig(t, cfg,
+		downstreamSetup{
+			alias: "myserver",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "leak"}, func(_ context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "result contains secret-xyz789"}}}, nil, nil
+				})
+			},
+		},
+	)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "myserver__leak"})
+	require.NoError(t, err)
+	text := result.Content[0].(*mcp.TextContent)
+	assert.Equal(t, "result contains [REDACTED]", text.Text)
+}
+
+func TestProxy_OutputRedaction_ResourceContents(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"files": {Command: "unused"},
+		},
+		Redaction: config.RedactionConfig{
+			Patterns: []config.RedactionPattern{
+				{Name: "secret", Pattern: `secret-\w+`},
+			},
+		},
+	}
+	cfg.Policy.Default = "allow"
+	require.NoError(t, cfg.Validate())
+
+	session := setupProxyWithConfig(t, cfg,
+		downstreamSetup{
+			alias: "files",
+			setup: func(s *mcp.Server) {
+				s.AddResource(&mcp.Resource{URI: "test://data", Name: "data"}, func(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+					return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "test://data", Text: "has secret-abc inside"}}}, nil
+				})
+			},
+		},
+	)
+
+	result, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: "test://data"})
+	require.NoError(t, err)
+	assert.Equal(t, "has [REDACTED] inside", result.Contents[0].Text)
+}
+
+func TestProxy_Redaction_NoMatch(t *testing.T) {
+	type EmptyInput struct{}
+
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "unused"},
+		},
+		Redaction: config.RedactionConfig{
+			Patterns: []config.RedactionPattern{
+				{Name: "secret", Pattern: `secret-\w+`},
+			},
+		},
+	}
+	cfg.Policy.Default = "allow"
+	require.NoError(t, cfg.Validate())
+
+	session := setupProxyWithConfig(t, cfg,
+		downstreamSetup{
+			alias: "myserver",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "clean"}, func(_ context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "clean data"}}}, nil, nil
+				})
+			},
+		},
+	)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "myserver__clean"})
+	require.NoError(t, err)
+	text := result.Content[0].(*mcp.TextContent)
+	assert.Equal(t, "clean data", text.Text)
+}

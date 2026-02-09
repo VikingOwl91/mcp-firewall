@@ -12,6 +12,7 @@ import (
 	"github.com/VikingOwl91/mcp-firewall/internal/config"
 	"github.com/VikingOwl91/mcp-firewall/internal/logging"
 	"github.com/VikingOwl91/mcp-firewall/internal/policy"
+	"github.com/VikingOwl91/mcp-firewall/internal/redaction"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -26,6 +27,7 @@ type Proxy struct {
 	server         *mcp.Server
 	downstreams    map[string]*downstreamEntry
 	policy         *policy.Engine
+	redaction      *redaction.Engine
 	resourceRoutes map[string]string // URI → alias
 }
 
@@ -48,12 +50,22 @@ func New(cfg *config.Config, logger *slog.Logger) *Proxy {
 		}
 	}
 
+	var re *redaction.Engine
+	if len(cfg.Redaction.Patterns) > 0 {
+		var err error
+		re, err = redaction.New(cfg.Redaction.Patterns)
+		if err != nil {
+			logger.Error("failed to create redaction engine", slog.String("error", err.Error()))
+		}
+	}
+
 	return &Proxy{
 		cfg:            cfg,
 		logger:         logger,
 		server:         server,
 		downstreams:    make(map[string]*downstreamEntry),
 		policy:         pe,
+		redaction:      re,
 		resourceRoutes: make(map[string]string),
 	}
 }
@@ -131,22 +143,44 @@ func (p *Proxy) registerTools(ctx context.Context, alias string, session *mcp.Cl
 						Arguments: argsMap,
 					},
 				}
-				effect, rule := p.policy.Evaluate(rc)
+				decision := p.policy.Evaluate(rc)
 				if info := logging.GetAuditInfo(ctx); info != nil {
-					info.PolicyEffect = string(effect)
-					info.PolicyRule = rule
+					info.PolicyEffect = string(decision.Effect)
+					info.PolicyRule = decision.Rule
 				}
-				if effect == policy.Deny {
+				if decision.Effect == policy.Deny {
 					return &mcp.CallToolResult{
-						Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("denied by policy: %s", rule)}},
+						Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("denied by policy: %s", decision.Rule)}},
+						IsError: true,
+					}, nil
+				}
+				if decision.Effect == policy.Prompt {
+					msg := fmt.Sprintf("action requires user approval: %s", decision.Rule)
+					if decision.Message != "" {
+						msg = fmt.Sprintf("action requires user approval: %s", decision.Message)
+					}
+					return &mcp.CallToolResult{
+						Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 						IsError: true,
 					}, nil
 				}
 			}
 
+			// Input redaction
+			callArgs := argsMap
+			if p.redaction != nil && callArgs != nil {
+				redacted, matched := p.redaction.RedactMap(callArgs)
+				if len(matched) > 0 {
+					callArgs = redacted
+					if info := logging.GetAuditInfo(ctx); info != nil {
+						info.Redacted = true
+					}
+				}
+			}
+
 			var args any
-			if argsMap != nil {
-				args = argsMap
+			if callArgs != nil {
+				args = callArgs
 			}
 
 			timeout := p.cfg.ResolvedTimeout(serverAlias)
@@ -168,6 +202,17 @@ func (p *Proxy) registerTools(ctx context.Context, alias string, session *mcp.Cl
 					}, nil
 				}
 				return nil, err
+			}
+
+			// Output redaction
+			if result != nil && p.redaction != nil {
+				redacted, matched := p.redaction.RedactContent(result.Content)
+				if len(matched) > 0 {
+					result.Content = redacted
+					if info := logging.GetAuditInfo(ctx); info != nil {
+						info.Redacted = true
+					}
+				}
 			}
 
 			if result != nil && p.cfg.MaxOutputBytes > 0 {
@@ -220,13 +265,20 @@ func (p *Proxy) registerResources(ctx context.Context, alias string, session *mc
 						URI: req.Params.URI,
 					},
 				}
-				effect, rule := p.policy.Evaluate(rc)
+				decision := p.policy.Evaluate(rc)
 				if info := logging.GetAuditInfo(ctx); info != nil {
-					info.PolicyEffect = string(effect)
-					info.PolicyRule = rule
+					info.PolicyEffect = string(decision.Effect)
+					info.PolicyRule = decision.Rule
 				}
-				if effect == policy.Deny {
-					return nil, fmt.Errorf("denied by policy: %s", rule)
+				if decision.Effect == policy.Deny {
+					return nil, fmt.Errorf("denied by policy: %s", decision.Rule)
+				}
+				if decision.Effect == policy.Prompt {
+					msg := fmt.Sprintf("action requires user approval: %s", decision.Rule)
+					if decision.Message != "" {
+						msg = fmt.Sprintf("action requires user approval: %s", decision.Message)
+					}
+					return nil, fmt.Errorf("%s", msg)
 				}
 			}
 
@@ -245,6 +297,17 @@ func (p *Proxy) registerResources(ctx context.Context, alias string, session *mc
 					return nil, fmt.Errorf("timeout after %s", timeout)
 				}
 				return nil, err
+			}
+
+			// Output redaction
+			if result != nil && p.redaction != nil {
+				redacted, matched := p.redaction.RedactResourceContents(result.Contents)
+				if len(matched) > 0 {
+					result.Contents = redacted
+					if info := logging.GetAuditInfo(ctx); info != nil {
+						info.Redacted = true
+					}
+				}
 			}
 
 			if result != nil && p.cfg.MaxOutputBytes > 0 {

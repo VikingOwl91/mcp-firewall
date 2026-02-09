@@ -23,6 +23,7 @@ type PolicyRule struct {
 	Name       string `yaml:"name"`
 	Expression string `yaml:"expression"`
 	Effect     string `yaml:"effect"`
+	Message    string `yaml:"message,omitempty"`
 }
 
 type PolicyConfig struct {
@@ -30,9 +31,19 @@ type PolicyConfig struct {
 	Rules   []PolicyRule `yaml:"rules,omitempty"`
 }
 
+type RedactionPattern struct {
+	Name    string `yaml:"name"`
+	Pattern string `yaml:"pattern"`
+}
+
+type RedactionConfig struct {
+	Patterns []RedactionPattern `yaml:"patterns,omitempty"`
+}
+
 type Config struct {
 	Downstreams    map[string]ServerConfig `yaml:"downstreams"`
 	Policy         PolicyConfig            `yaml:"policy,omitempty"`
+	Redaction      RedactionConfig         `yaml:"redaction,omitempty"`
 	LogLevel       string                  `yaml:"log_level"`
 	Timeout        string                  `yaml:"timeout,omitempty"`
 	MaxOutputBytes int                     `yaml:"max_output_bytes,omitempty"`
@@ -104,6 +115,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if err := c.validateRedaction(); err != nil {
+		return err
+	}
+
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
 	}
@@ -143,8 +158,8 @@ func (c *Config) validatePolicy() error {
 
 	seen := make(map[string]bool)
 	for i, rule := range c.Policy.Rules {
-		if rule.Effect != "allow" && rule.Effect != "deny" {
-			return fmt.Errorf("rule %d (%q): effect must be 'allow' or 'deny', got %q", i, rule.Name, rule.Effect)
+		if rule.Effect != "allow" && rule.Effect != "deny" && rule.Effect != "prompt" {
+			return fmt.Errorf("rule %d (%q): effect must be 'allow', 'deny', or 'prompt', got %q", i, rule.Name, rule.Effect)
 		}
 		if seen[rule.Name] {
 			return fmt.Errorf("rule %d: duplicate rule name %q", i, rule.Name)
@@ -156,6 +171,26 @@ func (c *Config) validatePolicy() error {
 		return err
 	}
 
+	return nil
+}
+
+func (c *Config) validateRedaction() error {
+	seen := make(map[string]bool)
+	for i, p := range c.Redaction.Patterns {
+		if p.Name == "" {
+			return fmt.Errorf("redaction pattern %d: name is required", i)
+		}
+		if p.Pattern == "" {
+			return fmt.Errorf("redaction pattern %q: pattern is required", p.Name)
+		}
+		if _, err := regexp.Compile(p.Pattern); err != nil {
+			return fmt.Errorf("redaction pattern %q: invalid regex: %w", p.Name, err)
+		}
+		if seen[p.Name] {
+			return fmt.Errorf("redaction pattern %d: duplicate name %q", i, p.Name)
+		}
+		seen[p.Name] = true
+	}
 	return nil
 }
 

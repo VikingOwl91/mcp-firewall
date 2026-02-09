@@ -16,4 +16,8 @@ policy:
     - name: allow-echo
       expression: 'server == "echoserver" && tool.name == "echo"'
       effect: allow
+redaction:
+  patterns:
+    - name: api-key
+      pattern: 'sk-[a-zA-Z0-9]{32}'
 log_level: debug

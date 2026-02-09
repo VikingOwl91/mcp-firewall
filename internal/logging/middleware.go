@@ -46,6 +46,9 @@ func NewReceivingMiddleware(logger *slog.Logger) mcp.Middleware {
 			if info.Truncated {
 				attrs = append(attrs, slog.Bool("truncated", true))
 			}
+			if info.Redacted {
+				attrs = append(attrs, slog.Bool("redacted", true))
+			}
 
 			logger.LogAttrs(ctx, slog.LevelInfo, "mcp request", attrs...)
 

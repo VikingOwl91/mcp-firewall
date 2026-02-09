@@ -31,6 +31,10 @@ func TestLoad_ValidMultiDownstream(t *testing.T) {
 	assert.Equal(t, "allow-echo", cfg.Policy.Rules[0].Name)
 	assert.Equal(t, "allow", cfg.Policy.Rules[0].Effect)
 
+	require.Len(t, cfg.Redaction.Patterns, 1)
+	assert.Equal(t, "api-key", cfg.Redaction.Patterns[0].Name)
+	assert.Equal(t, `sk-[a-zA-Z0-9]{32}`, cfg.Redaction.Patterns[0].Pattern)
+
 	assert.Equal(t, "debug", cfg.LogLevel)
 	assert.Equal(t, "30s", cfg.Timeout)
 	assert.Equal(t, 524288, cfg.MaxOutputBytes)
@@ -326,6 +330,139 @@ func TestResolvedTimeout_PerDownstreamOverride(t *testing.T) {
 
 	assert.Equal(t, 5*time.Second, cfg.ResolvedTimeout("fast"))
 	assert.Equal(t, 60*time.Second, cfg.ResolvedTimeout("normal"))
+}
+
+func TestValidate_PromptEffectInRule(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+		Policy: config.PolicyConfig{
+			Rules: []config.PolicyRule{
+				{Name: "ask-first", Expression: "true", Effect: "prompt"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
+func TestValidate_PromptEffectInDefault(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+		Policy: config.PolicyConfig{Default: "prompt"},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "policy default")
+}
+
+func TestValidate_PromptRuleWithMessage(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+		Policy: config.PolicyConfig{
+			Rules: []config.PolicyRule{
+				{Name: "ask-first", Expression: "true", Effect: "prompt", Message: "requires approval"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
+func TestValidate_RedactionPatternsValid(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+		Redaction: config.RedactionConfig{
+			Patterns: []config.RedactionPattern{
+				{Name: "api-key", Pattern: `sk-[a-zA-Z0-9]{32}`},
+				{Name: "email", Pattern: `[\w.+-]+@[\w-]+\.[\w.]+`},
+			},
+		},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
+func TestValidate_RedactionPatternsInvalidRegex(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+		Redaction: config.RedactionConfig{
+			Patterns: []config.RedactionPattern{
+				{Name: "bad", Pattern: `[invalid`},
+			},
+		},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bad")
+}
+
+func TestValidate_RedactionPatternsEmpty(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+}
+
+func TestValidate_RedactionPatternMissingName(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+		Redaction: config.RedactionConfig{
+			Patterns: []config.RedactionPattern{
+				{Name: "", Pattern: `secret`},
+			},
+		},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "name")
+}
+
+func TestValidate_RedactionPatternMissingPattern(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+		Redaction: config.RedactionConfig{
+			Patterns: []config.RedactionPattern{
+				{Name: "empty-pat", Pattern: ""},
+			},
+		},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pattern")
+}
+
+func TestValidate_RedactionDuplicateNames(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+		Redaction: config.RedactionConfig{
+			Patterns: []config.RedactionPattern{
+				{Name: "secret", Pattern: `secret`},
+				{Name: "secret", Pattern: `other`},
+			},
+		},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate")
 }
 
 func TestValidate_ValidAliases(t *testing.T) {

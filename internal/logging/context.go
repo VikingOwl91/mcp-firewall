@@ -12,6 +12,7 @@ type AuditInfo struct {
 	PolicyRule   string
 	Timeout      bool
 	Truncated    bool
+	Redacted     bool
 }
 
 func WithAuditInfo(ctx context.Context, info *AuditInfo) context.Context {

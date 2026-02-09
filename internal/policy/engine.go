@@ -10,9 +10,16 @@ import (
 type Effect string
 
 const (
-	Allow Effect = "allow"
-	Deny  Effect = "deny"
+	Allow  Effect = "allow"
+	Deny   Effect = "deny"
+	Prompt Effect = "prompt"
 )
+
+type Decision struct {
+	Effect  Effect
+	Rule    string
+	Message string
+}
 
 type RequestContext struct {
 	Method   string
@@ -34,6 +41,7 @@ type compiledRule struct {
 	name    string
 	program cel.Program
 	effect  Effect
+	message string
 }
 
 type Engine struct {
@@ -68,6 +76,7 @@ func New(cfg config.PolicyConfig) (*Engine, error) {
 			name:    r.Name,
 			program: prg,
 			effect:  Effect(r.Effect),
+			message: r.Message,
 		})
 	}
 
@@ -77,7 +86,7 @@ func New(cfg config.PolicyConfig) (*Engine, error) {
 	}, nil
 }
 
-func (e *Engine) Evaluate(rc RequestContext) (Effect, string) {
+func (e *Engine) Evaluate(rc RequestContext) Decision {
 	activation := map[string]any{
 		"method": rc.Method,
 		"server": rc.Server,
@@ -93,20 +102,33 @@ func (e *Engine) Evaluate(rc RequestContext) (Effect, string) {
 	for _, rule := range e.rules {
 		out, _, err := rule.program.Eval(activation)
 		if err != nil {
-			return Deny, fmt.Sprintf("error evaluating rule %q: %v", rule.name, err)
+			return Decision{
+				Effect: Deny,
+				Rule:   fmt.Sprintf("error evaluating rule %q: %v", rule.name, err),
+			}
 		}
 
 		matched, ok := out.Value().(bool)
 		if !ok {
-			return Deny, fmt.Sprintf("error evaluating rule %q: non-boolean result", rule.name)
+			return Decision{
+				Effect: Deny,
+				Rule:   fmt.Sprintf("error evaluating rule %q: non-boolean result", rule.name),
+			}
 		}
 
 		if matched {
-			return rule.effect, rule.name
+			return Decision{
+				Effect:  rule.effect,
+				Rule:    rule.name,
+				Message: rule.message,
+			}
 		}
 	}
 
-	return e.defaultEffect, fmt.Sprintf("default:%s", e.defaultEffect)
+	return Decision{
+		Effect: e.defaultEffect,
+		Rule:   fmt.Sprintf("default:%s", e.defaultEffect),
+	}
 }
 
 func ensureMap(m map[string]any) map[string]any {

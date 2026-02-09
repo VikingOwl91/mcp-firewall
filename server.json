@@ -8,7 +8,7 @@
     "id": "VikingOwl91/mcp-firewall"
   },
   "version_detail": {
-    "version": "1.0.0",
+    "version": "1.0.1",
     "release_date": "2026-02-09",
     "is_latest": true
   },
@@ -16,12 +16,12 @@
     {
       "registry_name": "npm",
       "name": "@vikingowl/mcp-firewall",
-      "version": "1.0.0"
+      "version": "1.0.1"
     },
     {
       "registry_name": "go",
       "name": "github.com/VikingOwl91/mcp-firewall",
-      "version": "1.0.0"
+      "version": "1.0.1"
     }
   ],
   "remotes": {

@@ -1,6 +1,6 @@
 {
   "name": "@vikingowl/mcp-firewall",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Security firewall proxy for MCP servers — policy enforcement, redaction, sandboxing, and supply chain controls",
   "bin": {
     "mcp-firewall": "index.js"

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"time"
 
 	"github.com/google/cel-go/cel"
 	"gopkg.in/yaml.v3"
@@ -15,6 +16,7 @@ type ServerConfig struct {
 	Command string   `yaml:"command"`
 	Args    []string `yaml:"args,omitempty"`
 	Env     []string `yaml:"env,omitempty"`
+	Timeout string   `yaml:"timeout,omitempty"`
 }
 
 type PolicyRule struct {
@@ -29,9 +31,11 @@ type PolicyConfig struct {
 }
 
 type Config struct {
-	Downstreams map[string]ServerConfig `yaml:"downstreams"`
-	Policy      PolicyConfig           `yaml:"policy,omitempty"`
-	LogLevel    string                 `yaml:"log_level"`
+	Downstreams    map[string]ServerConfig `yaml:"downstreams"`
+	Policy         PolicyConfig            `yaml:"policy,omitempty"`
+	LogLevel       string                  `yaml:"log_level"`
+	Timeout        string                  `yaml:"timeout,omitempty"`
+	MaxOutputBytes int                     `yaml:"max_output_bytes,omitempty"`
 }
 
 // oldConfig detects the deprecated singular "downstream:" key.
@@ -75,6 +79,25 @@ func (c *Config) Validate() error {
 		if sc.Command == "" {
 			return fmt.Errorf("downstream %q: command is required", alias)
 		}
+		if sc.Timeout != "" {
+			if _, err := time.ParseDuration(sc.Timeout); err != nil {
+				return fmt.Errorf("downstream %q: invalid timeout %q: %w", alias, sc.Timeout, err)
+			}
+		}
+	}
+
+	if c.Timeout == "" {
+		c.Timeout = "60s"
+	}
+	if _, err := time.ParseDuration(c.Timeout); err != nil {
+		return fmt.Errorf("invalid timeout %q: %w", c.Timeout, err)
+	}
+
+	if c.MaxOutputBytes < 0 {
+		return fmt.Errorf("max_output_bytes must be positive, got %d", c.MaxOutputBytes)
+	}
+	if c.MaxOutputBytes == 0 {
+		c.MaxOutputBytes = 1048576
 	}
 
 	if err := c.validatePolicy(); err != nil {
@@ -86,6 +109,15 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+func (c *Config) ResolvedTimeout(alias string) time.Duration {
+	if sc, ok := c.Downstreams[alias]; ok && sc.Timeout != "" {
+		d, _ := time.ParseDuration(sc.Timeout)
+		return d
+	}
+	d, _ := time.ParseDuration(c.Timeout)
+	return d
 }
 
 func validateAlias(alias string) error {

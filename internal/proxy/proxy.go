@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -148,10 +149,38 @@ func (p *Proxy) registerTools(ctx context.Context, alias string, session *mcp.Cl
 				args = argsMap
 			}
 
-			return ds.CallTool(ctx, &mcp.CallToolParams{
+			timeout := p.cfg.ResolvedTimeout(serverAlias)
+			callCtx, callCancel := context.WithTimeout(ctx, timeout)
+			defer callCancel()
+
+			result, err := ds.CallTool(callCtx, &mcp.CallToolParams{
 				Name:      originalName,
 				Arguments: args,
 			})
+			if err != nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					if info := logging.GetAuditInfo(ctx); info != nil {
+						info.Timeout = true
+					}
+					return &mcp.CallToolResult{
+						Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("timeout after %s", timeout)}},
+						IsError: true,
+					}, nil
+				}
+				return nil, err
+			}
+
+			if result != nil && p.cfg.MaxOutputBytes > 0 {
+				truncated, wasTruncated := TruncateContent(result.Content, p.cfg.MaxOutputBytes)
+				if wasTruncated {
+					result.Content = truncated
+					if info := logging.GetAuditInfo(ctx); info != nil {
+						info.Truncated = true
+					}
+				}
+			}
+
+			return result, nil
 		})
 
 		p.logger.Info("registered proxied tool",
@@ -201,9 +230,34 @@ func (p *Proxy) registerResources(ctx context.Context, alias string, session *mc
 				}
 			}
 
-			return ds.ReadResource(ctx, &mcp.ReadResourceParams{
+			timeout := p.cfg.ResolvedTimeout(serverAlias)
+			readCtx, readCancel := context.WithTimeout(ctx, timeout)
+			defer readCancel()
+
+			result, err := ds.ReadResource(readCtx, &mcp.ReadResourceParams{
 				URI: req.Params.URI,
 			})
+			if err != nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					if info := logging.GetAuditInfo(ctx); info != nil {
+						info.Timeout = true
+					}
+					return nil, fmt.Errorf("timeout after %s", timeout)
+				}
+				return nil, err
+			}
+
+			if result != nil && p.cfg.MaxOutputBytes > 0 {
+				truncated, wasTruncated := TruncateResourceContents(result.Contents, p.cfg.MaxOutputBytes)
+				if wasTruncated {
+					result.Contents = truncated
+					if info := logging.GetAuditInfo(ctx); info != nil {
+						info.Truncated = true
+					}
+				}
+			}
+
+			return result, nil
 		})
 
 		p.logger.Info("registered proxied resource",

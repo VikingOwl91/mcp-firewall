@@ -10,6 +10,8 @@ type AuditInfo struct {
 	ResourceURI  string
 	PolicyEffect string
 	PolicyRule   string
+	Timeout      bool
+	Truncated    bool
 }
 
 func WithAuditInfo(ctx context.Context, info *AuditInfo) context.Context {

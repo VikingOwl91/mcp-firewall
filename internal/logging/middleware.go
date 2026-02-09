@@ -40,6 +40,12 @@ func NewReceivingMiddleware(logger *slog.Logger) mcp.Middleware {
 			if info.PolicyRule != "" {
 				attrs = append(attrs, slog.String("policy_rule", info.PolicyRule))
 			}
+			if info.Timeout {
+				attrs = append(attrs, slog.Bool("timeout", true))
+			}
+			if info.Truncated {
+				attrs = append(attrs, slog.Bool("truncated", true))
+			}
 
 			logger.LogAttrs(ctx, slog.LevelInfo, "mcp request", attrs...)
 

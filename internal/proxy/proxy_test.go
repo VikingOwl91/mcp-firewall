@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/VikingOwl91/mcp-firewall/internal/config"
 	"github.com/VikingOwl91/mcp-firewall/internal/proxy"
@@ -38,6 +40,7 @@ func setupProxy(t *testing.T, downstreams ...downstreamSetup) *mcp.ClientSession
 		LogLevel:    "debug",
 	}
 	cfg.Policy.Default = "allow" // default allow for non-policy tests
+	require.NoError(t, cfg.Validate())
 
 	p := proxy.New(cfg, logger)
 
@@ -363,6 +366,7 @@ func setupProxyWithPolicy(t *testing.T, pol config.PolicyConfig, downstreams ...
 		Policy:      pol,
 		LogLevel:    "debug",
 	}
+	require.NoError(t, cfg.Validate())
 
 	p := proxy.New(cfg, logger)
 
@@ -520,4 +524,280 @@ func TestProxy_NoPolicy(t *testing.T) {
 	assert.False(t, result.IsError)
 	text := result.Content[0].(*mcp.TextContent)
 	assert.Equal(t, "free pass", text.Text)
+}
+
+// setupProxyWithConfig is like setupProxy but accepts a full Config for timeout/max_output tests.
+func setupProxyWithConfig(t *testing.T, cfg *config.Config, downstreams ...downstreamSetup) *mcp.ClientSession {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	logger := slog.Default()
+
+	p := proxy.New(cfg, logger)
+
+	for _, ds := range downstreams {
+		dsServer := mcp.NewServer(&mcp.Implementation{
+			Name: "test-" + ds.alias, Version: "0.1.0",
+		}, nil)
+		ds.setup(dsServer)
+
+		dsServerT, dsClientT := mcp.NewInMemoryTransports()
+		_, err := dsServer.Connect(ctx, dsServerT, nil)
+		require.NoError(t, err)
+
+		err = p.ConnectDownstream(ctx, ds.alias, dsClientT)
+		require.NoError(t, err)
+	}
+
+	err := p.RegisterUpstreamHandlers(ctx)
+	require.NoError(t, err)
+
+	upServerT, upClientT := mcp.NewInMemoryTransports()
+	go func() { _ = p.ServeUpstream(ctx, upServerT) }()
+
+	client := mcp.NewClient(&mcp.Implementation{
+		Name: "test-client", Version: "0.1.0",
+	}, nil)
+	session, err := client.Connect(ctx, upClientT, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { session.Close() })
+
+	return session
+}
+
+func TestProxy_ToolCallTimeout(t *testing.T) {
+	type EmptyInput struct{}
+
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"slow": {Command: "unused"},
+		},
+		Timeout: "50ms",
+	}
+	cfg.Policy.Default = "allow"
+	require.NoError(t, cfg.Validate())
+
+	session := setupProxyWithConfig(t, cfg,
+		downstreamSetup{
+			alias: "slow",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "hang"}, func(ctx context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
+					select {
+					case <-time.After(5 * time.Second):
+						return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "done"}}}, nil, nil
+					case <-ctx.Done():
+						return nil, nil, ctx.Err()
+					}
+				})
+			},
+		},
+	)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "slow__hang"})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	text := result.Content[0].(*mcp.TextContent)
+	assert.Contains(t, text.Text, "timeout")
+}
+
+func TestProxy_ResourceReadTimeout(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"slow": {Command: "unused"},
+		},
+		Timeout: "50ms",
+	}
+	cfg.Policy.Default = "allow"
+	require.NoError(t, cfg.Validate())
+
+	session := setupProxyWithConfig(t, cfg,
+		downstreamSetup{
+			alias: "slow",
+			setup: func(s *mcp.Server) {
+				s.AddResource(&mcp.Resource{URI: "test://slow", Name: "slow"}, func(ctx context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+					select {
+					case <-time.After(5 * time.Second):
+						return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "test://slow", Text: "done"}}}, nil
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				})
+			},
+		},
+	)
+
+	_, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: "test://slow"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timeout")
+}
+
+func TestProxy_PerDownstreamTimeout(t *testing.T) {
+	type EmptyInput struct{}
+
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"fast": {Command: "unused", Timeout: "50ms"},
+			"slow": {Command: "unused", Timeout: "5s"},
+		},
+		Timeout: "5s",
+	}
+	cfg.Policy.Default = "allow"
+	require.NoError(t, cfg.Validate())
+
+	session := setupProxyWithConfig(t, cfg,
+		downstreamSetup{
+			alias: "fast",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "hang"}, func(ctx context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
+					select {
+					case <-time.After(5 * time.Second):
+						return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "done"}}}, nil, nil
+					case <-ctx.Done():
+						return nil, nil, ctx.Err()
+					}
+				})
+			},
+		},
+		downstreamSetup{
+			alias: "slow",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "quick"}, func(_ context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil, nil
+				})
+			},
+		},
+	)
+
+	// fast__hang should timeout (50ms timeout, handler sleeps 5s)
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "fast__hang"})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	text := result.Content[0].(*mcp.TextContent)
+	assert.Contains(t, text.Text, "timeout")
+
+	// slow__quick should succeed (5s timeout, handler returns immediately)
+	result, err = session.CallTool(context.Background(), &mcp.CallToolParams{Name: "slow__quick"})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	text = result.Content[0].(*mcp.TextContent)
+	assert.Equal(t, "ok", text.Text)
+}
+
+func TestTruncateContent_UnderLimit(t *testing.T) {
+	content := []mcp.Content{&mcp.TextContent{Text: "hello"}}
+	result, truncated := proxy.TruncateContent(content, 100)
+	assert.False(t, truncated)
+	assert.Len(t, result, 1)
+	text := result[0].(*mcp.TextContent)
+	assert.Equal(t, "hello", text.Text)
+}
+
+func TestTruncateContent_OverLimit(t *testing.T) {
+	content := []mcp.Content{&mcp.TextContent{Text: strings.Repeat("a", 100)}}
+	result, truncated := proxy.TruncateContent(content, 50)
+	assert.True(t, truncated)
+
+	// Should have original (truncated) + warning
+	require.Len(t, result, 2)
+	text := result[0].(*mcp.TextContent)
+	assert.Len(t, text.Text, 50)
+	warning := result[1].(*mcp.TextContent)
+	assert.Contains(t, warning.Text, "truncated")
+}
+
+func TestTruncateContent_MultipleEntries(t *testing.T) {
+	content := []mcp.Content{
+		&mcp.TextContent{Text: strings.Repeat("a", 30)},
+		&mcp.TextContent{Text: strings.Repeat("b", 30)},
+	}
+	result, truncated := proxy.TruncateContent(content, 40)
+	assert.True(t, truncated)
+
+	// First entry fits (30 bytes), second gets truncated to 10 bytes, plus warning
+	require.Len(t, result, 3)
+	text0 := result[0].(*mcp.TextContent)
+	assert.Equal(t, strings.Repeat("a", 30), text0.Text)
+	text1 := result[1].(*mcp.TextContent)
+	assert.Len(t, text1.Text, 10)
+	warning := result[2].(*mcp.TextContent)
+	assert.Contains(t, warning.Text, "truncated")
+}
+
+func TestTruncateResourceContents_UnderLimit(t *testing.T) {
+	contents := []*mcp.ResourceContents{{URI: "test://a", Text: "hello"}}
+	result, truncated := proxy.TruncateResourceContents(contents, 100)
+	assert.False(t, truncated)
+	assert.Equal(t, "hello", result[0].Text)
+}
+
+func TestTruncateResourceContents_OverLimit(t *testing.T) {
+	contents := []*mcp.ResourceContents{{URI: "test://a", Text: strings.Repeat("x", 100)}}
+	result, truncated := proxy.TruncateResourceContents(contents, 50)
+	assert.True(t, truncated)
+	assert.Len(t, result[0].Text, 50)
+	// Last entry is warning
+	assert.Contains(t, result[len(result)-1].Text, "truncated")
+}
+
+func TestProxy_ToolCallTruncated(t *testing.T) {
+	type EmptyInput struct{}
+
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"big": {Command: "unused"},
+		},
+		Timeout:        "5s",
+		MaxOutputBytes: 50,
+	}
+	cfg.Policy.Default = "allow"
+	require.NoError(t, cfg.Validate())
+
+	session := setupProxyWithConfig(t, cfg,
+		downstreamSetup{
+			alias: "big",
+			setup: func(s *mcp.Server) {
+				mcp.AddTool(s, &mcp.Tool{Name: "large"}, func(_ context.Context, _ *mcp.CallToolRequest, _ EmptyInput) (*mcp.CallToolResult, any, error) {
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: strings.Repeat("x", 200)}}}, nil, nil
+				})
+			},
+		},
+	)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "big__large"})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	// Should have truncated content + warning
+	require.True(t, len(result.Content) >= 2)
+	warning := result.Content[len(result.Content)-1].(*mcp.TextContent)
+	assert.Contains(t, warning.Text, "truncated")
+}
+
+func TestProxy_ResourceReadTruncated(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"big": {Command: "unused"},
+		},
+		Timeout:        "5s",
+		MaxOutputBytes: 50,
+	}
+	cfg.Policy.Default = "allow"
+	require.NoError(t, cfg.Validate())
+
+	session := setupProxyWithConfig(t, cfg,
+		downstreamSetup{
+			alias: "big",
+			setup: func(s *mcp.Server) {
+				s.AddResource(&mcp.Resource{URI: "test://big", Name: "big"}, func(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+					return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: "test://big", Text: strings.Repeat("y", 200)}}}, nil
+				})
+			},
+		},
+	)
+
+	result, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: "test://big"})
+	require.NoError(t, err)
+	// Last content should contain truncation warning
+	last := result.Contents[len(result.Contents)-1]
+	assert.Contains(t, last.Text, "truncated")
 }

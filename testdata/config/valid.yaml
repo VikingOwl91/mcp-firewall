@@ -1,3 +1,5 @@
+timeout: 30s
+max_output_bytes: 524288
 downstreams:
   echoserver:
     command: ./testdata/echoserver/echoserver
@@ -5,6 +7,7 @@ downstreams:
       - --verbose
     env:
       - FOO=bar
+    timeout: 10s
   another:
     command: ./another-server
 policy:

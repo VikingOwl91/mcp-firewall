@@ -3,6 +3,7 @@ package config_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/VikingOwl91/mcp-firewall/internal/config"
 	"github.com/stretchr/testify/assert"
@@ -19,9 +20,11 @@ func TestLoad_ValidMultiDownstream(t *testing.T) {
 	assert.Equal(t, "./testdata/echoserver/echoserver", echo.Command)
 	assert.Equal(t, []string{"--verbose"}, echo.Args)
 	assert.Equal(t, []string{"FOO=bar"}, echo.Env)
+	assert.Equal(t, "10s", echo.Timeout)
 
 	another := cfg.Downstreams["another"]
 	assert.Equal(t, "./another-server", another.Command)
+	assert.Empty(t, another.Timeout)
 
 	assert.Equal(t, "deny", cfg.Policy.Default)
 	require.Len(t, cfg.Policy.Rules, 1)
@@ -29,6 +32,11 @@ func TestLoad_ValidMultiDownstream(t *testing.T) {
 	assert.Equal(t, "allow", cfg.Policy.Rules[0].Effect)
 
 	assert.Equal(t, "debug", cfg.LogLevel)
+	assert.Equal(t, "30s", cfg.Timeout)
+	assert.Equal(t, 524288, cfg.MaxOutputBytes)
+
+	assert.Equal(t, 10*time.Second, cfg.ResolvedTimeout("echoserver"))
+	assert.Equal(t, 30*time.Second, cfg.ResolvedTimeout("another"))
 }
 
 func TestLoad_ValidMinimal(t *testing.T) {
@@ -39,6 +47,8 @@ func TestLoad_ValidMinimal(t *testing.T) {
 	assert.Equal(t, "echo", cfg.Downstreams["myserver"].Command)
 	assert.Equal(t, "deny", cfg.Policy.Default)
 	assert.Equal(t, "info", cfg.LogLevel)
+	assert.Equal(t, "60s", cfg.Timeout)
+	assert.Equal(t, 1048576, cfg.MaxOutputBytes)
 }
 
 func TestLoad_FileNotFound(t *testing.T) {
@@ -207,6 +217,115 @@ func TestLoad_InvalidPolicy(t *testing.T) {
 	_, err := config.Load("../../testdata/config/invalid_policy.yaml")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "CEL")
+}
+
+func TestValidate_DefaultTimeout(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+	assert.Equal(t, "60s", cfg.Timeout)
+}
+
+func TestValidate_DefaultMaxOutputBytes(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+	assert.Equal(t, 1048576, cfg.MaxOutputBytes)
+}
+
+func TestValidate_InvalidTimeout(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+		Timeout: "not-a-duration",
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timeout")
+}
+
+func TestValidate_InvalidDownstreamTimeout(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo", Timeout: "bad"},
+		},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timeout")
+}
+
+func TestValidate_PerDownstreamTimeout(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"fast": {Command: "echo", Timeout: "5s"},
+			"slow": {Command: "echo", Timeout: "120s"},
+		},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+	assert.Equal(t, "5s", cfg.Downstreams["fast"].Timeout)
+	assert.Equal(t, "120s", cfg.Downstreams["slow"].Timeout)
+}
+
+func TestValidate_MaxOutputBytesZero(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+		MaxOutputBytes: 0, // zero gets defaulted, not rejected
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+	assert.Equal(t, 1048576, cfg.MaxOutputBytes)
+}
+
+func TestValidate_MaxOutputBytesNegative(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+		MaxOutputBytes: -1,
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_output_bytes")
+}
+
+func TestResolvedTimeout_Global(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"myserver": {Command: "echo"},
+		},
+		Timeout: "30s",
+	}
+	require.NoError(t, cfg.Validate())
+
+	d := cfg.ResolvedTimeout("myserver")
+	assert.Equal(t, 30*time.Second, d)
+}
+
+func TestResolvedTimeout_PerDownstreamOverride(t *testing.T) {
+	cfg := &config.Config{
+		Downstreams: map[string]config.ServerConfig{
+			"fast":   {Command: "echo", Timeout: "5s"},
+			"normal": {Command: "echo"},
+		},
+		Timeout: "60s",
+	}
+	require.NoError(t, cfg.Validate())
+
+	assert.Equal(t, 5*time.Second, cfg.ResolvedTimeout("fast"))
+	assert.Equal(t, 60*time.Second, cfg.ResolvedTimeout("normal"))
 }
 
 func TestValidate_ValidAliases(t *testing.T) {
